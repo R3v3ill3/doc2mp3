@@ -8,6 +8,9 @@ const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const fetch =require('node-fetch');
 
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+ffmpeg.setFfmpegPath(ffmpegPath);
+
 const app = express();
 const port = process.env.PORT || 3000;
 
