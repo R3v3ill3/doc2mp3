@@ -184,7 +184,7 @@ app.post('/process-document', upload.single('document'), async (req, res) => {
   }
 });
 
-// Main concatenation endpoint
+// Main concatenation endpoint - FIXED
 app.post('/concatenate-audio', upload.array('audioFiles'), async (req, res) => {
   try {
     console.log('Received concatenation request');
@@ -203,38 +203,56 @@ app.post('/concatenate-audio', upload.array('audioFiles'), async (req, res) => {
     const outputPath = path.join('uploads', `audiobook_${Date.now()}.mp3`);
     
     console.log(`Concatenating ${sortedFiles.length} files`);
+    console.log('File order:', sortedFiles.map(f => f.originalname));
 
-    // Create FFmpeg command
-    let command = ffmpeg();
+    // Create file list for FFmpeg concat demuxer
+    const fileListPath = path.join('uploads', `filelist_${Date.now()}.txt`);
+    const fileListContent = sortedFiles
+      .map(file => `file '${path.resolve(file.path)}'`)
+      .join('\n');
     
-    // Add all input files
-    sortedFiles.forEach(file => {
-      command = command.input(file.path);
-    });
+    fs.writeFileSync(fileListPath, fileListContent);
+    console.log('Created file list:', fileListContent);
 
-    // Configure output
-    command
+    // Use FFmpeg concat demuxer - this is the proper way to concatenate
+    ffmpeg()
+      .input(fileListPath)
+      .inputOptions(['-f', 'concat', '-safe', '0'])
+      .audioCodec('mp3')
+      .format('mp3')
       .on('start', (commandLine) => {
         console.log('FFmpeg started:', commandLine);
       })
       .on('progress', (progress) => {
-        console.log('Processing: ' + progress.percent + '% done');
+        console.log('Processing: ' + Math.round(progress.percent || 0) + '% done');
       })
       .on('end', () => {
-        console.log('Concatenation finished');
+        console.log('Concatenation finished successfully');
         
-        // Clean up input files
+        // Clean up input files and file list
         sortedFiles.forEach(file => {
-          fs.unlinkSync(file.path);
+          if (fs.existsSync(file.path)) {
+            fs.unlinkSync(file.path);
+          }
         });
+        
+        if (fs.existsSync(fileListPath)) {
+          fs.unlinkSync(fileListPath);
+        }
 
         // Send the concatenated file
         res.download(outputPath, 'audiobook.mp3', (err) => {
           if (err) {
             console.error('Download error:', err);
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Download failed', details: err.message });
+            }
           } else {
+            console.log('File sent successfully');
             // Clean up output file after download
-            fs.unlinkSync(outputPath);
+            if (fs.existsSync(outputPath)) {
+              fs.unlinkSync(outputPath);
+            }
           }
         });
       })
@@ -248,21 +266,31 @@ app.post('/concatenate-audio', upload.array('audioFiles'), async (req, res) => {
           }
         });
         
-        res.status(500).json({ 
-          error: 'Concatenation failed', 
-          details: err.message 
-        });
+        if (fs.existsSync(fileListPath)) {
+          fs.unlinkSync(fileListPath);
+        }
+        
+        if (fs.existsSync(outputPath)) {
+          fs.unlinkSync(outputPath);
+        }
+        
+        if (!res.headersSent) {
+          res.status(500).json({ 
+            error: 'Concatenation failed', 
+            details: err.message 
+          });
+        }
       })
-      .audioCodec('mp3')
-      .format('mp3')
       .save(outputPath);
 
   } catch (error) {
     console.error('Server error:', error);
-    res.status(500).json({ 
-      error: 'Internal server error', 
-      details: error.message 
-    });
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        error: 'Internal server error', 
+        details: error.message 
+      });
+    }
   }
 });
 
