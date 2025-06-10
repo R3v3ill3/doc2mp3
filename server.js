@@ -4,6 +4,8 @@ const ffmpeg = require('fluent-ffmpeg');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -20,9 +22,166 @@ if (!fs.existsSync('uploads')) {
   fs.mkdirSync('uploads');
 }
 
+// Helper function to chunk text into segments under 4000 characters
+function chunkText(text, maxChunkSize = 4000) {
+  const chunks = [];
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  let currentChunk = '';
+  let chunkIndex = 0;
+
+  for (const sentence of sentences) {
+    const trimmedSentence = sentence.trim();
+    if (!trimmedSentence) continue;
+
+    // If adding this sentence would exceed the limit, save current chunk and start new one
+    if (currentChunk.length + trimmedSentence.length + 1 > maxChunkSize) {
+      if (currentChunk.trim()) {
+        chunks.push({
+          text: currentChunk.trim(),
+          index: chunkIndex++
+        });
+        currentChunk = '';
+      }
+    }
+
+    // If a single sentence is too long, split it by words
+    if (trimmedSentence.length > maxChunkSize) {
+      const words = trimmedSentence.split(' ');
+      let wordChunk = '';
+      
+      for (const word of words) {
+        if (wordChunk.length + word.length + 1 > maxChunkSize) {
+          if (wordChunk.trim()) {
+            chunks.push({
+              text: wordChunk.trim(),
+              index: chunkIndex++
+            });
+            wordChunk = '';
+          }
+        }
+        wordChunk += (wordChunk ? ' ' : '') + word;
+      }
+      
+      if (wordChunk.trim()) {
+        currentChunk += (currentChunk ? ' ' : '') + wordChunk;
+      }
+    } else {
+      currentChunk += (currentChunk ? ' ' : '') + trimmedSentence;
+    }
+  }
+
+  // Add any remaining text as the final chunk
+  if (currentChunk.trim()) {
+    chunks.push({
+      text: currentChunk.trim(),
+      index: chunkIndex++
+    });
+  }
+
+  return chunks;
+}
+
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ status: 'Audiobook Concatenator Service Running' });
+});
+
+// Document processing endpoint
+app.post('/process-document', upload.single('document'), async (req, res) => {
+  try {
+    console.log('Received document processing request');
+    
+    if (!req.file) {
+      return res.status(400).json({ error: 'No document file provided' });
+    }
+
+    const file = req.file;
+    const filePath = file.path;
+    let extractedText = '';
+
+    console.log('Processing file:', file.originalname, 'Type:', file.mimetype);
+
+    try {
+      // Process different file types
+      if (file.mimetype === 'application/pdf') {
+        // Process PDF
+        const dataBuffer = fs.readFileSync(filePath);
+        const pdfData = await pdfParse(dataBuffer);
+        extractedText = pdfData.text;
+        
+      } else if (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        // Process DOCX
+        const dataBuffer = fs.readFileSync(filePath);
+        const result = await mammoth.extractRawText({ buffer: dataBuffer });
+        extractedText = result.value;
+        
+      } else if (file.mimetype === 'text/plain') {
+        // Process TXT
+        extractedText = fs.readFileSync(filePath, 'utf8');
+        
+      } else {
+        // Try to read as text for other file types
+        extractedText = fs.readFileSync(filePath, 'utf8');
+      }
+
+      // Clean up the extracted text
+      extractedText = extractedText
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n\s*\n/g, '\n\n')
+        .trim();
+
+      if (!extractedText || extractedText.length < 50) {
+        return res.status(400).json({ 
+          error: 'No readable text found in document or document is too short' 
+        });
+      }
+
+      // Calculate word count
+      const wordCount = extractedText.split(/\s+/).filter(word => word.length > 0).length;
+
+      // Chunk the text
+      const chunks = chunkText(extractedText);
+
+      console.log(`Extracted ${wordCount} words, created ${chunks.length} chunks`);
+
+      // Clean up uploaded file
+      fs.unlinkSync(filePath);
+
+      res.json({
+        chunks,
+        totalWordCount: wordCount,
+        originalFileName: file.originalname,
+        message: `Successfully processed ${file.originalname}: ${wordCount} words in ${chunks.length} chunks`
+      });
+
+    } catch (processingError) {
+      console.error('Document processing error:', processingError);
+      
+      // Clean up file on error
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+      
+      res.status(500).json({ 
+        error: 'Failed to process document', 
+        details: processingError.message 
+      });
+    }
+
+  } catch (error) {
+    console.error('Server error:', error);
+    
+    // Clean up file on error
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    
+    res.status(500).json({ 
+      error: 'Internal server error', 
+      details: error.message 
+    });
+  }
 });
 
 // Main concatenation endpoint
