@@ -6,13 +6,23 @@ const fs = require('fs');
 const path = require('path');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
-const fetch = require('node-fetch'); // Add this dependency
+const fetch =require('node-fetch');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Enable CORS for all routes
-app.use(cors());
+// PATCH APPLIED: Replaced the original cors() middleware with a more explicit one.
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
 app.use(express.json());
 
 // Configure multer for file uploads
@@ -185,7 +195,7 @@ app.post('/process-document', upload.single('document'), async (req, res) => {
   }
 });
 
-// NEW: Concatenation endpoint that accepts Firebase Storage URLs
+// PATCH APPLIED: The 'end' event handler is updated to send a buffer instead of using res.download.
 app.post('/concatenate-from-urls', async (req, res) => {
   try {
     console.log('Received concatenation request with URLs');
@@ -264,27 +274,34 @@ app.post('/concatenate-from-urls', async (req, res) => {
         })
         .on('end', () => {
           console.log('Concatenation finished successfully');
-          
-          // Clean up temporary directory
-          if (fs.existsSync(tempDir)) {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-          }
+          // This section is modified based on the patch.
+          try {
+            // Read the concatenated file into a buffer
+            const concatenatedBuffer = fs.readFileSync(outputPath);
 
-          // Send the concatenated file
-          res.download(outputPath, 'audiobook.mp3', (err) => {
-            if (err) {
-              console.error('Download error:', err);
-              if (!res.headersSent) {
-                res.status(500).json({ error: 'Download failed', details: err.message });
-              }
-            } else {
-              console.log('File sent successfully');
-              // Clean up output file after download
-              if (fs.existsSync(outputPath)) {
-                fs.unlinkSync(outputPath);
-              }
+            console.log(`Sending file as buffer (${concatenatedBuffer.length} bytes).`);
+
+            // Set headers and send the buffer directly
+            res.setHeader('Content-Type', 'audio/mpeg');
+            res.setHeader('Content-Disposition', 'attachment; filename="audiobook.mp3"');
+            res.setHeader('Content-Length', concatenatedBuffer.length);
+            
+            res.send(concatenatedBuffer);
+
+          } catch (readError) {
+            console.error('Error reading concatenated file for sending:', readError);
+            if (!res.headersSent) {
+              res.status(500).json({ error: 'Failed to read final audio file', details: readError.message });
             }
-          });
+          } finally {
+            // Clean up all temporary files and the final output file
+            if (fs.existsSync(tempDir)) {
+              fs.rmSync(tempDir, { recursive: true, force: true });
+            }
+            if (fs.existsSync(outputPath)) {
+              fs.unlinkSync(outputPath);
+            }
+          }
         })
         .on('error', (err) => {
           console.error('FFmpeg error:', err);
