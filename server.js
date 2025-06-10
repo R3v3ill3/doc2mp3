@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
+const fetch = require('node-fetch'); // Add this dependency
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -184,116 +185,87 @@ app.post('/process-document', upload.single('document'), async (req, res) => {
   }
 });
 
-// Main concatenation endpoint - FIXED
-app.post('/concatenate-audio', upload.array('audioFiles'), async (req, res) => {
+// NEW: Concatenation endpoint that accepts Firebase Storage URLs
+app.post('/concatenate-from-urls', async (req, res) => {
   try {
-    console.log('Received concatenation request');
+    console.log('Received concatenation request with URLs');
     
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'No audio files provided' });
+    const { audioUrls } = req.body;
+    
+    if (!audioUrls || !Array.isArray(audioUrls) || audioUrls.length === 0) {
+      return res.status(400).json({ error: 'No audio URLs provided' });
     }
 
-    // Sort files by their original index (assuming filename contains index)
-    const sortedFiles = req.files.sort((a, b) => {
-      const indexA = parseInt(a.originalname.match(/(\d+)/)?.[1] || '0');
-      const indexB = parseInt(b.originalname.match(/(\d+)/)?.[1] || '0');
-      return indexA - indexB;
-    });
+    console.log(`Downloading ${audioUrls.length} audio files from Firebase`);
 
-    const outputPath = path.join('uploads', `audiobook_${Date.now()}.mp3`);
+    // Download all URLs to temporary files
+    const downloadedFiles = [];
+    const tempDir = path.join('uploads', `temp_${Date.now()}`);
     
-    console.log(`Concatenating ${sortedFiles.length} files`);
-    console.log('File order:', sortedFiles.map(f => f.originalname));
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
 
-    // Create file list for FFmpeg concat demuxer
-    const fileListPath = path.join('uploads', `filelist_${Date.now()}.txt`);
-    const fileListContent = sortedFiles
-      .map(file => `file '${path.resolve(file.path)}'`)
-      .join('\n');
-    
-    fs.writeFileSync(fileListPath, fileListContent);
-    console.log('Created file list:', fileListContent);
-
-    // Use FFmpeg concat demuxer - this is the proper way to concatenate
-    ffmpeg()
-      .input(fileListPath)
-      .inputOptions(['-f', 'concat', '-safe', '0'])
-      .audioCodec('mp3')
-      .format('mp3')
-      .on('start', (commandLine) => {
-        console.log('FFmpeg started:', commandLine);
-      })
-      .on('progress', (progress) => {
-        console.log('Processing: ' + Math.round(progress.percent || 0) + '% done');
-      })
-      .on('end', () => {
-        console.log('Concatenation finished successfully');
+    try {
+      for (let i = 0; i < audioUrls.length; i++) {
+        const url = audioUrls[i];
+        console.log(`Downloading file ${i + 1}/${audioUrls.length}: ${url}`);
         
-        // Clean up input files and file list
-        sortedFiles.forEach(file => {
-          if (fs.existsSync(file.path)) {
-            fs.unlinkSync(file.path);
-          }
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to download ${url}: ${response.statusText}`);
+        }
+        
+        const buffer = await response.buffer();
+        const filename = `chunk_${i.toString().padStart(3, '0')}.mp3`;
+        const filePath = path.join(tempDir, filename);
+        
+        fs.writeFileSync(filePath, buffer);
+        downloadedFiles.push({
+          path: filePath,
+          originalname: filename
         });
-        
-        if (fs.existsSync(fileListPath)) {
-          fs.unlinkSync(fileListPath);
-        }
+      }
 
-        // Send the concatenated file
-        res.download(outputPath, 'audiobook.mp3', (err) => {
-          if (err) {
-            console.error('Download error:', err);
-            if (!res.headersSent) {
-              res.status(500).json({ error: 'Download failed', details: err.message });
-            }
-          } else {
-            console.log('File sent successfully');
-            // Clean up output file after download
-            if (fs.existsSync(outputPath)) {
-              fs.unlinkSync(outputPath);
-            }
-          }
-        });
-      })
-      .on('error', (err) => {
-        console.error('FFmpeg error:', err);
-        
-        // Clean up files on error
-        sortedFiles.forEach(file => {
-          if (fs.existsSync(file.path)) {
-            fs.unlinkSync(file.path);
-          }
-        });
-        
-        if (fs.existsSync(fileListPath)) {
-          fs.unlinkSync(fileListPath);
-        }
-        
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-        }
-        
-        if (!res.headersSent) {
-          res.status(500).json({ 
-            error: 'Concatenation failed', 
-            details: err.message 
-          });
-        }
-      })
-      .save(outputPath);
+      console.log(`Downloaded ${downloadedFiles.length} files successfully`);
 
-  } catch (error) {
-    console.error('Server error:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ 
-        error: 'Internal server error', 
-        details: error.message 
+      // Sort files by their index (they should already be sorted, but just in case)
+      const sortedFiles = downloadedFiles.sort((a, b) => {
+        const indexA = parseInt(a.originalname.match(/(\d+)/)?.[1] || '0');
+        const indexB = parseInt(b.originalname.match(/(\d+)/)?.[1] || '0');
+        return indexA - indexB;
       });
-    }
-  }
-});
 
-app.listen(port, () => {
-  console.log(`Audiobook concatenator service running on port ${port}`);
-});
+      const outputPath = path.join('uploads', `audiobook_${Date.now()}.mp3`);
+      
+      console.log(`Concatenating ${sortedFiles.length} files`);
+      console.log('File order:', sortedFiles.map(f => f.originalname));
+
+      // Create file list for FFmpeg concat demuxer
+      const fileListPath = path.join(tempDir, 'filelist.txt');
+      const fileListContent = sortedFiles
+        .map(file => `file '${path.resolve(file.path)}'`)
+        .join('\n');
+      
+      fs.writeFileSync(fileListPath, fileListContent);
+      console.log('Created file list for FFmpeg');
+
+      // Use FFmpeg concat demuxer
+      ffmpeg()
+        .input(fileListPath)
+        .inputOptions(['-f', 'concat', '-safe', '0'])
+        .audioCodec('mp3')
+        .format('mp3')
+        .on('start', (commandLine) => {
+          console.log('FFmpeg started:', commandLine);
+        })
+        .on('progress', (progress) => {
+          console.log('Processing: ' + Math.round(progress.percent || 0) + '% done');
+        })
+        .on('end', () => {
+          console.log('Concatenation finished successfully');
+          
+          // Clean up temporary directory
+          if (fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+ 
