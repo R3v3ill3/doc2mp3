@@ -299,7 +299,7 @@ app.post('/concatenate-from-urls', async (req, res) => {
       ffmpeg()
         .input(fileListPath)
         .inputOptions(['-f', 'concat', '-safe', '0'])
-        .audioCodec('mp3')
+        .audioCodec('copy')
         .format('mp3')
         .on('start', (commandLine) => {
           console.log('FFmpeg started:', commandLine);
@@ -418,7 +418,7 @@ app.post('/concatenate-audio', upload.array('audioFiles'), async (req, res) => {
     ffmpeg()
       .input(fileListPath)
       .inputOptions(['-f', 'concat', '-safe', '0'])
-      .audioCodec('mp3')
+      .audioCodec('copy')
       .format('mp3')
       .on('start', (commandLine) => {
         console.log('FFmpeg started:', commandLine);
